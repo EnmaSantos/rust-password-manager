@@ -47,52 +47,56 @@ fn add_password() {
 
     let encrypted_password = encrypt_password(password).expect("Encryption failed");
 
-    // Format data and save it to the file
-    let data = format!("{}:{}:{}\n", service, username, base64::encode(&encrypted_password));
-    
+    // Save the data with original password length in the format:
+    // service:username:original_len:encrypted_password
+    let data = format!(
+        "{}:{}:{}:{}\n", 
+        service, 
+        username, 
+        password.len(), 
+        base64::encode(&encrypted_password)
+    );
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open("passwords.txt")
         .expect("Failed to open file");
-    
+
     file.write_all(data.as_bytes()).expect("Failed to write data to file");
 
     println!("Password saved successfully!");
 }
 
 fn encrypt_password(password: &str) -> io::Result<Vec<u8>> {
-    // Create an UnboundKey with the AES-256-GCM algorithm and our encryption key.
     let key = UnboundKey::new(&AES_256_GCM, KEY)
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid key"))?;
 
-    // Generate a unique nonce for this encryption.
     let nonce = generate_nonce()?;  // Generate the nonce here
-
-    // Create a sealing key from the unbound key.
     let sealing_key = LessSafeKey::new(key);
 
-    // Convert the nonce to a vector and store it in encrypted_data.
+    // Convert the nonce to a vector and initialize encrypted_data with it
     let mut encrypted_data = nonce.as_ref().to_vec();
 
-    // Convert the password string into a byte vector.
+    // Convert the password string into a byte vector
     let mut password_bytes = password.as_bytes().to_vec();
 
-    // Encrypt the password in-place, appending an authentication tag.
+    // Encrypt the password in-place, appending an authentication tag
     sealing_key
         .seal_in_place_append_tag(nonce, Aad::empty(), &mut password_bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "Encryption failed"))?;
 
-    // Append the encrypted password bytes to encrypted_data.
+    // Append the encrypted password bytes to encrypted_data
     encrypted_data.extend(password_bytes);
 
-    // Return the encrypted data, with the nonce at the beginning.
     Ok(encrypted_data)
 }
 
 fn generate_nonce() -> io::Result<Nonce> {
     let mut nonce_bytes = [0u8; 12];
-    SystemRandom::new().fill(&mut nonce_bytes).map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to generate nonce"))?;
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to generate nonce"))?;
     Ok(Nonce::assume_unique_for_key(nonce_bytes))
 }
 
@@ -111,37 +115,44 @@ fn retrieve_password() {
         let line = line.expect("Failed to read line");
         let parts: Vec<&str> = line.split(':').collect();
 
-        if parts.len() == 3 {
+        if parts.len() == 4 {
             let service = parts[0];
             let username = parts[1];
-            let encrypted_password = base64::decode(parts[2]).expect("Failed to decode base64");
-            let decrypted_password = decrypt_password(&encrypted_password).expect("Decryption failed");
+            let original_len: usize = parts[2].parse().expect("Failed to parse original length");
+
+            // Decode the Base64-encoded encrypted password
+            let encrypted_password = base64::decode(parts[3]).expect("Failed to decode base64");
+
+            // Decrypt the password
+            let decrypted_password = decrypt_password(&encrypted_password, original_len)
+                .expect("Decryption failed");
 
             println!("Service: {}, Username: {}, Password: {}", service, username, decrypted_password);
         }
     }
 }
 
-fn decrypt_password(encrypted_data: &[u8]) -> io::Result<String> {
-    // Ensure that encrypted_data is at least 12 bytes for the nonce
+fn decrypt_password(encrypted_data: &[u8], original_len: usize) -> io::Result<String> {
     if encrypted_data.len() < 12 {
         return Err(io::Error::new(io::ErrorKind::Other, "Invalid encrypted data: too short"));
     }
 
-    let key = UnboundKey::new(&AES_256_GCM, KEY).map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid key"))?;
+    let key = UnboundKey::new(&AES_256_GCM, KEY)
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid key"))?;
     let opening_key = LessSafeKey::new(key);
 
-    // Extract the nonce from the first 12 bytes of encrypted_data
     let nonce = Nonce::try_assume_unique_for_key(&encrypted_data[..12])
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid nonce"))?;
-
-    // The rest of encrypted_data after the nonce is the actual encrypted password
     let mut encrypted_password = encrypted_data[12..].to_vec();
 
-    // Perform decryption
+    // Decrypt in-place
     opening_key.open_in_place(nonce, Aad::empty(), &mut encrypted_password)
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "Decryption failed"))?;
 
-    // Convert decrypted bytes to UTF-8 string
+    // Truncate to the original password length after decryption
+    encrypted_password.truncate(original_len);
+
+    // Convert the decrypted bytes to a UTF-8 string
     String::from_utf8(encrypted_password).map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid UTF-8"))
 }
+
